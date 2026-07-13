@@ -2,12 +2,13 @@
 Scheduler — har daqiqa kanallarni tekshiradi.
 Kanal nomidan yuboradi (bot kanal admin bo'lsa avtomatik).
 """
+import asyncio
 import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from aiogram.types import InputMediaPhoto, InputMediaVideo
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -89,47 +90,42 @@ async def send_channel(bot: Bot, ch):
 async def deliver(bot: Bot, cid: int, lesson, contents):
     """
     Dars kontent tartibini saqlagan holda yuboradi.
-    Audio o'z text_content'ini caption sifatida ishlatadi —
-    alohida matn xabar yuborilmaydi.
+    Har xabar orasida 1s delay — flood limitdan himoya.
+    Audio/rasm/video o'z text_content'ini caption sifatida ishlatadi.
     """
     title = f"📚 <b>{lesson['lesson_number']}-dars: {lesson['title']}</b>"
 
     # Sarlavha xabarini yuborish
-    await _msg(bot, cid, title)
+    await _safe(bot.send_message, cid, text=title)
 
     # Kontentni order_index tartibida yuborish
     for c in contents:
-        mt = c["media_type"]
+        await asyncio.sleep(1)          # flood limitdan himoya
+        mt  = c["media_type"]
+        cap = c.get("text_content") or None
 
         if mt == "text":
-            # Oddiy matn — alohida xabar
-            txt = c.get("text_content") or ""
-            if txt.strip():
-                await _msg(bot, cid, txt)
+            txt = (c.get("text_content") or "").strip()
+            if txt:
+                await _safe(bot.send_message, cid, text=txt)
 
         elif mt == "audio":
-            # Audio — caption bilan birgalikda bitta xabarda
-            cap = c.get("text_content") or None
             await _safe(bot.send_audio, cid, audio=c["file_id"],
                         **({"caption": cap} if cap else {}))
 
         elif mt == "voice":
-            cap = c.get("text_content") or None
             await _safe(bot.send_voice, cid, voice=c["file_id"],
                         **({"caption": cap} if cap else {}))
 
         elif mt == "photo":
-            cap = c.get("text_content") or None
             await _safe(bot.send_photo, cid, photo=c["file_id"],
                         **({"caption": cap} if cap else {}))
 
         elif mt == "video":
-            cap = c.get("text_content") or None
             await _safe(bot.send_video, cid, video=c["file_id"],
                         **({"caption": cap} if cap else {}))
 
         elif mt == "document":
-            cap = c.get("text_content") or None
             await _safe(bot.send_document, cid, document=c["file_id"],
                         **({"caption": cap} if cap else {}))
 
@@ -139,12 +135,21 @@ async def _msg(bot, cid, text):
 
 
 async def _safe(fn, cid, **kw):
-    try:
-        await fn(cid, **kw)
-    except (TelegramForbiddenError, TelegramBadRequest):
-        raise
-    except Exception as e:
-        logger.error(f"{fn.__name__} xato ({cid}): {e}")
+    """Xabar yuborish — flood limitga duch kelsa kutib qayta urinadi."""
+    for attempt in range(5):
+        try:
+            await fn(cid, **kw)
+            return
+        except TelegramRetryAfter as e:
+            wait = e.retry_after + 1
+            logger.warning(f"{fn.__name__} flood limit — {wait}s kutilmoqda...")
+            await asyncio.sleep(wait)
+        except (TelegramForbiddenError, TelegramBadRequest):
+            raise
+        except Exception as e:
+            logger.error(f"{fn.__name__} xato ({cid}): {e}")
+            return
+    logger.error(f"{fn.__name__} — 5 urinishdan keyin ham yuborilmadi ({cid})")
 
 
 async def _media_group(bot: Bot, cid: int, items: list, kind: str):
