@@ -4,7 +4,7 @@ import os
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from aiogram import F, Router
+from aiogram import F, Router, Bot
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -91,9 +91,8 @@ class CS(StatesGroup):
 
 
 class LS(StatesGroup):
-    title        = State()
-    content      = State()
-    audio_caption = State()   # audio yuborilgandan keyin caption so'rash
+    title   = State()
+    content = State()   # admin xabarlarni yuboradi, bot ularni saqlaydi
 
 
 class CHS(StatesGroup):
@@ -252,6 +251,7 @@ async def cb_crs_detail(cb: CallbackQuery):
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)
     )
 
+
 # ── darslar ───────────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data.startswith("lesadd:"))
@@ -271,8 +271,12 @@ async def proc_ls_title(m: Message, state: FSMContext):
     if not await chk(m.from_user.id): return await no_msg(m)
     await state.update_data(title=m.text.strip())
     await m.answer(
-        "📎 Kontent yuboring:\n"
-        "• 📝 Matn\n• 🖼 Rasm\n• 🎬 Video\n• 🎵 Audio\n\n"
+        "📨 Endi dars kontent xabarlarini yuboring.\n\n"
+        "Xabarlarni <b>aynan kanalda ko'rinishi kerak bo'lgan ko'rinishda</b> yuboring:\n"
+        "• Audio + caption birgalikda — audio yuborayotganda caption yozing\n"
+        "• Rasm + caption\n"
+        "• Oddiy matn\n"
+        "• Video\n\n"
         "Hammasi tayyor bo'lgach — /done\n"
         "Bekor qilish — /cancel"
     )
@@ -289,8 +293,8 @@ async def proc_ls_done(m: Message, state: FSMContext):
 
     if not items:
         return await m.answer(
-            "⚠️ Hech qanday kontent qo'shilmadi.\n"
-            "Rasm, video, audio yoki matn yuboring, keyin /done"
+            "⚠️ Hech qanday xabar qo'shilmadi.\n"
+            "Xabar yuboring, keyin /done"
         )
     if not cid or not title:
         await state.clear()
@@ -300,12 +304,18 @@ async def proc_ls_done(m: Message, state: FSMContext):
         num    = await db.get_next_lesson_num(cid)
         les_id = await db.create_lesson(cid, num, title)
         for i, item in enumerate(items):
-            await db.add_content(les_id, item["t"], item.get("f"), item.get("txt"), i)
+            await db.add_content(
+                les_id,
+                item["t"],
+                item.get("f"),
+                item.get("txt"),
+                i
+            )
         await state.clear()
         await m.answer(
             f"✅ <b>{num}-dars saqlandi!</b>\n"
             f"📖 <b>{title}</b>\n"
-            f"📎 Kontent: {len(items)} ta",
+            f"📨 Xabarlar soni: {len(items)} ta",
             reply_markup=main_kb()
         )
     except Exception as e:
@@ -313,140 +323,47 @@ async def proc_ls_done(m: Message, state: FSMContext):
         await m.answer(f"❌ Xato: {e}\nQaytadan urinib ko'ring.")
 
 
-@router.message(LS.content, F.photo)
-async def ls_photo(m: Message, state: FSMContext):
+def _item_from_msg(m: Message) -> dict | None:
+    """Xabardan kontent ma'lumotini ajratib oladi."""
+    if m.audio:
+        # Audio + caption (agar mavjud bo'lsa) birgalikda
+        return {"t": "audio", "f": m.audio.file_id, "txt": m.caption or None}
+    if m.voice:
+        return {"t": "voice", "f": m.voice.file_id, "txt": m.caption or None}
+    if m.photo:
+        return {"t": "photo", "f": m.photo[-1].file_id, "txt": m.caption or None}
+    if m.video:
+        return {"t": "video", "f": m.video.file_id, "txt": m.caption or None}
+    if m.document:
+        return {"t": "document", "f": m.document.file_id, "txt": m.caption or None}
+    if m.text and not m.text.startswith("/"):
+        return {"t": "text", "f": None, "txt": m.text}
+    return None
+
+
+@router.message(LS.content)
+async def ls_collect(m: Message, state: FSMContext):
+    """Barcha turdagi xabarlarni to'playdi."""
     if not await chk(m.from_user.id): return
-    data = await state.get_data()
-    items = data.get("items", [])
-    items.append({"t": "photo", "f": m.photo[-1].file_id})
-    await state.update_data(items=items)
-    await m.answer(f"✅ Rasm ({len(items)} ta). Davom eting yoki /done")
 
+    item = _item_from_msg(m)
+    if item is None:
+        return  # buyruqlar va noma'lum turlarni o'tkazib yuborish
 
-@router.message(LS.content, F.video)
-async def ls_video(m: Message, state: FSMContext):
-    if not await chk(m.from_user.id): return
-    data = await state.get_data()
-    items = data.get("items", [])
-    items.append({"t": "video", "f": m.video.file_id})
-    await state.update_data(items=items)
-    await m.answer(f"✅ Video ({len(items)} ta). Davom eting yoki /done")
-
-
-def audio_caption_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⏭ Matnsiz saqlash", callback_data="aud:skip")],
-    ])
-
-
-@router.message(LS.content, F.audio)
-async def ls_audio(m: Message, state: FSMContext):
-    if not await chk(m.from_user.id): return
-    await state.update_data(_pending_audio=m.audio.file_id)
-    await state.set_state(LS.audio_caption)
-    await m.answer(
-        "🎵 Audio qabul qilindi!\n\n"
-        "📝 Audioga <b>matn yuboring</b> — caption bo'ladi\n"
-        "yoki pastdagi tugmani bosing:",
-        reply_markup=audio_caption_kb()
-    )
-
-
-@router.callback_query(LS.audio_caption, F.data == "aud:skip")
-async def ls_audio_skip_cb(cb: CallbackQuery, state: FSMContext):
-    """Inline tugma — matnsiz saqlash."""
-    if not await chk(cb.from_user.id): return await cb.answer()
-    data    = await state.get_data()
-    items   = data.get("items", [])
-    file_id = data.get("_pending_audio")
-    items.append({"t": "audio", "f": file_id, "txt": None})
-    await state.update_data(items=items, _pending_audio=None)
-    await state.set_state(LS.content)
-    await cb.message.edit_text(
-        f"✅ Audio matnsiz saqlandi ({len(items)} ta).\n"
-        "Yana kontent yuboring yoki /done"
-    )
-
-
-@router.message(LS.audio_caption, F.text)
-async def ls_audio_caption_text(m: Message, state: FSMContext):
-    """Matn — caption sifatida saqlash."""
-    if not await chk(m.from_user.id): return
-    # /done yoki /cancel buyruqlarini o'tkazib yuborish
-    if m.text and m.text.startswith("/"):
-        return
-    data    = await state.get_data()
-    items   = data.get("items", [])
-    file_id = data.get("_pending_audio")
-    caption = m.text.strip()
-    items.append({"t": "audio", "f": file_id, "txt": caption})
-    await state.update_data(items=items, _pending_audio=None)
-    await state.set_state(LS.content)
-    await m.answer(
-        f"✅ Audio + matn saqlandi ({len(items)} ta).\n"
-        "Yana kontent yuboring yoki /done"
-    )
-
-
-@router.message(LS.audio_caption, Command("done"))
-async def ls_audio_caption_done(m: Message, state: FSMContext):
-    """audio_caption holatida /done — avval audioni saqlaydi, keyin darsni yakunlaydi."""
-    if not await chk(m.from_user.id): return
-    data    = await state.get_data()
-    items   = data.get("items", [])
-    file_id = data.get("_pending_audio")
-    if file_id:
-        items.append({"t": "audio", "f": file_id, "txt": None})
-    cid   = data.get("cid")
-    title = data.get("title", "")
-    if not items:
-        await state.set_state(LS.content)
-        return await m.answer("⚠️ Hech qanday kontent qo'shilmadi.")
-    try:
-        num    = await db.get_next_lesson_num(cid)
-        les_id = await db.create_lesson(cid, num, title)
-        for i, item in enumerate(items):
-            await db.add_content(les_id, item["t"], item.get("f"), item.get("txt"), i)
-        await state.clear()
-        await m.answer(
-            f"✅ <b>{num}-dars saqlandi!</b>\n"
-            f"📖 <b>{title}</b>\n"
-            f"📎 Kontent: {len(items)} ta",
-            reply_markup=main_kb()
-        )
-    except Exception as e:
-        logger.error(f"Dars saqlash xato: {e}", exc_info=True)
-        await m.answer(f"❌ Xato: {e}")
-
-
-@router.message(LS.content, F.voice)
-async def ls_voice(m: Message, state: FSMContext):
-    if not await chk(m.from_user.id): return
     data  = await state.get_data()
     items = data.get("items", [])
-    items.append({"t": "voice", "f": m.voice.file_id})
+    items.append(item)
     await state.update_data(items=items)
-    await m.answer(f"✅ Ovozli xabar ({len(items)} ta). Davom eting yoki /done")
 
-
-@router.message(LS.content, F.document)
-async def ls_doc(m: Message, state: FSMContext):
-    if not await chk(m.from_user.id): return
-    data  = await state.get_data()
-    items = data.get("items", [])
-    items.append({"t": "document", "f": m.document.file_id})
-    await state.update_data(items=items)
-    await m.answer(f"✅ Fayl ({len(items)} ta). Davom eting yoki /done")
-
-
-@router.message(LS.content, F.text)
-async def ls_text(m: Message, state: FSMContext):
-    if not await chk(m.from_user.id): return
-    data = await state.get_data()
-    items = data.get("items", [])
-    items.append({"t": "text", "txt": m.text})
-    await state.update_data(items=items)
-    await m.answer(f"✅ Matn ({len(items)} ta). Davom eting yoki /done")
+    # Foydalanuvchiga tasdiqlash xabari
+    types = {"audio": "🎵 Audio", "voice": "🎤 Ovozli", "photo": "🖼 Rasm",
+             "video": "🎬 Video", "document": "📄 Fayl", "text": "📝 Matn"}
+    label = types.get(item["t"], "📎 Kontent")
+    cap_info = f" + matn ✅" if item.get("txt") else ""
+    await m.answer(
+        f"{label}{cap_info} saqlandi ({len(items)}-xabar).\n"
+        "Davom eting yoki /done"
+    )
 
 
 # ── kanallar ──────────────────────────────────────────────────────────────────
