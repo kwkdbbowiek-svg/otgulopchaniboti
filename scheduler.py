@@ -87,49 +87,51 @@ async def send_channel(bot: Bot, ch):
 
 
 async def deliver(bot: Bot, cid: int, lesson, contents):
-    texts  = [c for c in contents if c["media_type"] == "text"]
-    photos = [c for c in contents if c["media_type"] == "photo"]
-    videos = [c for c in contents if c["media_type"] == "video"]
-    audios = [c for c in contents if c["media_type"] == "audio"]
-
+    """
+    Dars kontent tartibini saqlagan holda yuboradi.
+    Audio o'z text_content'ini caption sifatida ishlatadi —
+    alohida matn xabar yuborilmaydi.
+    """
     title = f"📚 <b>{lesson['lesson_number']}-dars: {lesson['title']}</b>"
 
-    # 1 rasm bo'lsa sarlavhani caption sifatida yuboramiz
-    if len(photos) == 1 and not videos and not audios:
-        cap = title
-        if texts:
-            cap += "\n\n" + texts[0]["text_content"]
-            texts = texts[1:]
-        try:
-            await bot.send_photo(cid, photo=photos[0]["file_id"], caption=cap)
-            photos = []
-        except (TelegramForbiddenError, TelegramBadRequest):
-            raise
-        except Exception as e:
-            logger.error(f"send_photo+caption xato: {e}")
-            await _msg(bot, cid, title)
-    else:
-        await _msg(bot, cid, title)
+    # Sarlavha xabarini yuborish
+    await _msg(bot, cid, title)
 
-    for t in texts:
-        await _msg(bot, cid, t["text_content"])
+    # Kontentni order_index tartibida yuborish
+    for c in contents:
+        mt = c["media_type"]
 
-    if photos:
-        await _media_group(bot, cid, photos, "photo")
-    if videos:
-        await _media_group(bot, cid, videos, "video")
-    for a in audios:
-        cap = a.get("text_content") or None
-        await _safe(bot.send_audio, cid, audio=a["file_id"],
-                    **({"caption": cap} if cap else {}))
+        if mt == "text":
+            # Oddiy matn — alohida xabar
+            txt = c.get("text_content") or ""
+            if txt.strip():
+                await _msg(bot, cid, txt)
 
-    # Voice xabarlar
-    for v in [c for c in contents if c["media_type"] == "voice"]:
-        await _safe(bot.send_voice, cid, voice=v["file_id"])
+        elif mt == "audio":
+            # Audio — caption bilan birgalikda bitta xabarda
+            cap = c.get("text_content") or None
+            await _safe(bot.send_audio, cid, audio=c["file_id"],
+                        **({"caption": cap} if cap else {}))
 
-    # Fayllar
-    for d in [c for c in contents if c["media_type"] == "document"]:
-        await _safe(bot.send_document, cid, document=d["file_id"])
+        elif mt == "voice":
+            cap = c.get("text_content") or None
+            await _safe(bot.send_voice, cid, voice=c["file_id"],
+                        **({"caption": cap} if cap else {}))
+
+        elif mt == "photo":
+            cap = c.get("text_content") or None
+            await _safe(bot.send_photo, cid, photo=c["file_id"],
+                        **({"caption": cap} if cap else {}))
+
+        elif mt == "video":
+            cap = c.get("text_content") or None
+            await _safe(bot.send_video, cid, video=c["file_id"],
+                        **({"caption": cap} if cap else {}))
+
+        elif mt == "document":
+            cap = c.get("text_content") or None
+            await _safe(bot.send_document, cid, document=c["file_id"],
+                        **({"caption": cap} if cap else {}))
 
 
 async def _msg(bot, cid, text):
